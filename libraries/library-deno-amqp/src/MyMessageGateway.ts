@@ -55,7 +55,7 @@ export default class MyMessageGateway {
     // can be changed to 
     // this.publishChannels[publishOnChannelNum] for round robin
     await this.publishChannels[0].publish("", queue, message, {
-      expiration: `${1000 * 6}}`,
+      expiration: `${1000 * 6}`,
       messageId,
       timestamp: new Date().getTime()
     });
