@@ -1,0 +1,205 @@
+import { encodeHeader, encodeMethod } from "./amqp_codec.ts";
+import { AmqpFrameReader } from "./amqp_frame_reader.ts";
+import type { IncomingFrame, OutgoingFrame } from "./amqp_frame.ts";
+import { writeAll } from "https://deno.land/std@0.178.0/streams/write_all.ts";
+
+export interface AmqpSocketWriter {
+  write(frame: OutgoingFrame): Promise<void>;
+  writeAll(frames: Array<OutgoingFrame>): Promise<void>;
+}
+
+export interface AmqpSocketReader {
+  read(): Promise<IncomingFrame>;
+}
+
+export interface AmqpSocketCloser {
+  close(): void;
+}
+
+const TYPES = {
+  method: 1,
+  header: 2,
+  content: 3,
+  heartbeat: 8,
+};
+
+function encodeFrame(frame: OutgoingFrame): Uint8Array {
+  let payload: Uint8Array;
+  switch (frame.type) {
+    case "method":
+      payload = encodeMethod(frame.payload);
+      break;
+    case "header":
+      payload = encodeHeader(frame.payload);
+      break;
+    default:
+      payload = frame.payload;
+      break;
+  }
+
+  const data = new Uint8Array(7 + payload.byteLength + 1);
+  const view = new DataView(data.buffer);
+  const type = TYPES[frame.type];
+
+  view.setUint8(0, type);
+  view.setUint16(1, frame.channel);
+
+  view.setUint32(3, payload.byteLength);
+  data.set(payload, 7);
+  view.setUint8(7 + payload.byteLength, 206);
+  if (data[7 + payload.byteLength] !== 206) {
+    console.log('sending invalid frame end')
+    console.log({ frame, data });
+  }
+  return data;
+}
+
+const HEARTBEAT_FRAME = new Uint8Array([
+  8,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  206,
+]);
+
+function splitArray(arr: Uint8Array, size: number): Uint8Array[] {
+  const chunks: Uint8Array[] = [];
+  let index = 0;
+
+  while (index < arr.length) {
+    chunks.push(arr.slice(index, size + index));
+    index += size;
+  }
+
+  return chunks;
+}
+function joinUint8Arrays(arrays: Array<Uint8Array>) {
+  const length = arrays.reduce((a, b) => a + b.length, 0);
+  const result = new Uint8Array(length);
+  let offset = 0;
+  for (const array of arrays) {
+    result.set(array, offset);
+    offset += array.length;
+  }
+  return result;
+}
+
+interface AmqpSocketOptions {
+  readTimeout?: number;
+  sendTimeout?: number;
+  frameMax?: number;
+}
+
+
+export class AmqpSocket
+  implements AmqpSocketWriter, AmqpSocketReader, AmqpSocketCloser {
+  #conn: Deno.Conn;
+  #reader: AmqpFrameReader;
+  #sendTimer: number | null = null;
+  #sendTimeout = 0;
+  #readTimeout = 0;
+  #frameMax = -1;
+
+  constructor(conn: Deno.Conn) {
+    this.#conn = conn;
+    this.#reader = new AmqpFrameReader(conn);
+  }
+
+  #resetSendTimer = () => {
+    if (this.#sendTimer !== null) {
+      clearTimeout(this.#sendTimer);
+      this.#sendTimer = null;
+    }
+
+    if (this.#sendTimeout > 0) {
+      this.#sendTimer = setTimeout(() => {
+        this.#conn.write(HEARTBEAT_FRAME);
+        this.#resetSendTimer();
+      }, this.#sendTimeout);
+    }
+  };
+
+  tune(options: AmqpSocketOptions) {
+    this.#readTimeout = options.readTimeout !== undefined
+      ? options.readTimeout
+      : this.#readTimeout;
+    this.#sendTimeout = options.sendTimeout !== undefined
+      ? options.sendTimeout
+      : this.#sendTimeout;
+    this.#frameMax = options.frameMax !== undefined
+      ? options.frameMax
+      : this.#frameMax;
+    this.#resetSendTimer();
+  }
+
+  async start() {
+    /*await this.#conn.write(
+      new Uint8Array([...new TextEncoder().encode("AMQP"), 0, 0, 9, 1]),
+    );*/
+    await writeAll(this.#conn, new Uint8Array([...new TextEncoder().encode("AMQP"), 0, 0, 9, 1]))
+  }
+
+  async write(frame: OutgoingFrame): Promise<void> {
+    this.#resetSendTimer();
+    if (
+      frame.type === "content" &&
+      this.#frameMax > 8 &&
+      frame.payload.length > this.#frameMax - 8
+    ) {
+      await Promise.all(
+        splitArray(frame.payload, this.#frameMax - 8).map((chunk) => {
+          return this.#conn.write(encodeFrame({
+            type: "content",
+            channel: frame.channel,
+            payload: chunk,
+          }));
+        }),
+      );
+
+      return;
+    }
+
+    await writeAll(this.#conn, encodeFrame(frame));
+  }
+  async writeAll(frames: Array<OutgoingFrame>): Promise<void> {
+
+    this.#resetSendTimer();
+    let buf = new Uint8Array();
+    for (const frame of frames) {
+      if (frame.type === "content") {
+        const chunks = this.#frameMax > 8 && frame.payload.length > this.#frameMax ? splitArray(
+          frame.payload, this.#frameMax - 8).map((chunk) => encodeFrame({ type: "content", channel: frame.channel, payload: chunk }))
+          : [encodeFrame(frame)];
+        buf = joinUint8Arrays([buf, ...chunks]);
+      } else {
+        buf = joinUint8Arrays([buf, encodeFrame(frame)]);
+      }
+    }
+    await writeAll(this.#conn, buf)
+
+  }
+
+  #clear = () => {
+    this.#readTimeout = 0;
+    this.#sendTimeout = 0;
+    this.#reader.abort();
+    this.#resetSendTimer();
+  };
+
+  async read(): Promise<IncomingFrame> {
+    try {
+      return await this.#reader.read(this.#readTimeout);
+    } catch (error) {
+      this.close();
+      throw error;
+    }
+  }
+
+  close(): void {
+    this.#clear();
+    this.#conn.close();
+  }
+}

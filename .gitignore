@@ -1,0 +1,7 @@
+
+
+# Ignore DevSpace cache and log folder
+.devspace/
+.vim
+.env
+

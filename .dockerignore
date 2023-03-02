@@ -1,0 +1,17 @@
+Dockerfile
+
+# Ignore .git folder
+.git
+
+node_modules/
+
+.devspace
+helm
+.env
+.gitignore
+.gitlab-ci.yml
+devspace_start.sh
+devspace.yaml
+Dockerfile
+.vscode
+.dockerignore
