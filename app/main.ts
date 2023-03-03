@@ -51,6 +51,7 @@ setInterval(() => {
   ])
 }, 5000)
 
+await connection.closed();
 /*
 await channel.publish(
   { routingKey: queueName },
