@@ -8,7 +8,7 @@ app
   .get("/", () => "healthy")
   .start({ hostname: '0.0.0.0', port: 8886 });
 
-import { AmqpChannel, connect } from "https://deno.land/x/amqp/mod.ts";
+import { AmqpChannel, connect } from "https://deno.land/x/amqp@v0.23.0/mod.ts";
 
 const messageData = [...Array(70).keys()].reduce((acc, _curr) => acc += 'aaaaaaaaaa', '')
 // We're sending 70 orders every time
@@ -50,6 +50,7 @@ setInterval(() => {
     ...publish(channel, messages),
   ])
 }, 5000)
+
 /*
 await channel.publish(
   { routingKey: queueName },
